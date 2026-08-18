@@ -3,8 +3,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 class AgentWithSkills:
     """
-    脚本驱动的单一 agents。LLM 只感知 read_skill + bash 两个工具。
-    业务逻辑以 Python 脚本实现，通过 SKILL.md 文档化 CLI 接口。
+agent
     """
 
     def __init__(self, session_id: str = "") -> None:
@@ -14,8 +13,15 @@ class AgentWithSkills:
         self.memory = AgentWithSkillsMemory()
         self._system_prompt = self._build_system_prompt()
 
-    # ── Public ────────────────────────────────────────────────────
+    @staticmethod
+    def _parse_tool_arguments(args_str: str) -> dict:
+        """解析 tool call 参数；无效 JSON 按空参数处理。"""
+        try:
+            return json.loads(args_str)
+        except (json.JSONDecodeError, TypeError):
+            return {}
 
+    # ── Public ────────────────────────────────────────────────────
     async def chat_stream(self, user_message: str) -> AsyncGenerator[dict, None]:
         """处理一轮用户输入，以事件流形式 yield 结果。"""
         self.memory.add_message({"role": "user", "content": user_message})
@@ -25,39 +31,14 @@ class AgentWithSkills:
             response = await self._call_llm()
             choice = response.choices[0]
             msg = choice.message
-
             # 归一化 tool call：优先用服务端解析好的原生 tool_calls；
             # 若服务端 parser 失配把 tool call 当文本吐出来，则从 content 兜底解析。
             calls = self._normalize_tool_calls(choice, msg)
 
             if calls:
-                report_triggered = False
-                for call_id, name, args_str in calls:
-                    try:
-                        args = json.loads(args_str)
-                    except Exception:
-                        args = {}
 
-                    logger.info("[Agent] tool=%s args=%s", name, args_str[:200])
-                    yield {"type": "step", "name": name, "status": "running",
-                           "call_id": call_id, "args": args}
-
-                    result_dict, llm_str = await self._execute_tool(name, args)
-
-                    # bash 执行后推送检测到的状态变化事件
-                    for event in result_dict.get("_events", []):
-                        if event.get("type") == "start_report":
-                            report_triggered = True
-                        yield event
-
-                    yield {"type": "step", "name": name, "status": "done",
-                           "call_id": call_id,
-                           "result": _result_display(name, result_dict, llm_str),
-                           "detail": llm_str}
-                    self.memory.add_message(
-                        {"role": "tool", "tool_call_id": call_id, "content": llm_str}
-                    )
-
+                async for event in self._stream_tool_calls(calls):
+                    yield event
                 continue
 
             if msg.content:
@@ -74,6 +55,33 @@ class AgentWithSkills:
         _session_path(self.session_id).unlink(missing_ok=True)
 
     # ── Internal ──────────────────────────────────────────────────
+    async def _stream_tool_calls(
+            self, calls: list[tuple[str, str, str]]
+    ) -> AsyncGenerator[dict, None]:
+        """执行一轮 tool calls，并按执行顺序输出状态事件。"""
+        for call_id, name, args_str in calls:
+            args = self._parse_tool_arguments(args_str)
+            logger.info("[Agent] tool=%s args=%s", name, args_str[:200])
+            yield {
+                "type": "step", "name": name, "status": "running",
+                "call_id": call_id, "args": args,
+            }
+
+            result_dict, llm_str = await self._execute_tool(name, args)
+
+            # bash 执行后推送检测到的状态变化事件
+            for event in result_dict.get("_events", []):
+                yield event
+
+            yield {
+                "type": "step", "name": name, "status": "done",
+                "call_id": call_id,
+                "result": _result_display(name, result_dict, llm_str),
+                "detail": llm_str,
+            }
+            self.memory.add_message(
+                {"role": "tool", "tool_call_id": call_id, "content": llm_str}
+            )
 
     def _build_system_prompt(self) -> str:
         lines = []
@@ -127,5 +135,3 @@ class AgentWithSkills:
         logger.warning("[Agent] 服务端未返回原生 tool_calls，已从文本兜底解析 %d 个: %s",
                        len(calls), [c[1] for c in calls])
         return calls
-
-
