@@ -9,7 +9,7 @@ import asyncio
 
 from dotenv import load_dotenv
 
-from agent_backend.agent.agent import Agent
+from agent_backend.agents.agent import Agent
 
 
 async def main() -> None:

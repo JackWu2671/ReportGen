@@ -53,16 +53,6 @@ class Agent:
         except (json.JSONDecodeError, TypeError):
             return {}
 
-    @staticmethod
-    def _message_to_dict(message: Any) -> dict[str, Any]:
-        if hasattr(message, "model_dump"):
-            return message.model_dump(exclude_none=True)
-        result = {"role": "assistant", "content": getattr(message, "content", None)}
-        tool_calls = getattr(message, "tool_calls", None)
-        if tool_calls:
-            result["tool_calls"] = tool_calls
-        return result
-
     def register_tool(
             self, schema: dict[str, Any], handler: Callable[..., Any]
     ) -> None:
@@ -100,35 +90,38 @@ class Agent:
 
         for _ in range(self.max_rounds):
             try:
-                response = await self._call_llm()
-                message = response.choices[0].message
+                stream = await self._call_llm()
+                assistant_message = None
+                tool_calls = []
+                async for response_event in self._iter_response(stream):
+                    if response_event["type"] == "text":
+                        yield response_event
+                    else:
+                        assistant_message = response_event["message"]
+                        tool_calls = response_event["tool_calls"]
             except Exception as exc:
                 logger.exception("LLM request failed")
                 yield {"type": "error", "message": f"大模型调用失败: {exc}"}
                 yield {"type": "done", "seconds": round(time.monotonic() - started, 1)}
                 return
 
-            assistant_message = self._message_to_dict(message)
+            assert assistant_message is not None
             self.messages.append(assistant_message)
-            tool_calls = getattr(message, "tool_calls", None) or []
 
             if not tool_calls:
-                content = getattr(message, "content", None) or ""
-                if content:
-                    yield {"type": "text", "chunk": content}
                 yield {"type": "done", "seconds": round(time.monotonic() - started, 1)}
                 return
 
             for call in tool_calls:
-                name = call.function.name
-                arguments = self._parse_arguments(call.function.arguments)
+                name = call["function"]["name"]
+                arguments = self._parse_arguments(call["function"]["arguments"])
                 yield {"type": "step", "status": "running", "name": name, "args": arguments}
                 result = await self._execute_tool(name, arguments)
                 yield {"type": "step", "status": "done", "name": name, "result": result}
                 self.messages.append(
                     {
                         "role": "tool",
-                        "tool_call_id": call.id,
+                        "tool_call_id": call["id"],
                         "content": result,
                     }
                 )
@@ -142,6 +135,14 @@ class Agent:
             "model": self.llm.model,
             "messages": messages,
             "temperature": self.llm.temperature,
+            "top_p": self.llm.top_p,
+            "max_tokens": self.llm.max_tokens,
+            # Agent 直接使用底层 client，必须与 LLMService._create_stream 保持一致；
+            # 否则 Qwen 服务端可能采用默认的 thinking 模式，在正式 content 前先生成
+            # 一段不可见 reasoning，表现为首字等待数秒。
+            "extra_body": {
+                "chat_template_kwargs": {"enable_thinking": self.llm.enable_thinking}
+            },
         }
         if self._tools:
             kwargs.update(
@@ -149,7 +150,47 @@ class Agent:
                 tool_choice="auto",
                 parallel_tool_calls=False,
             )
-        return await self.llm.client.chat.completions.create(**kwargs)
+        return await self.llm.client.chat.completions.create(**kwargs, stream=True)
+
+    async def _iter_response(self, stream) -> AsyncGenerator[dict[str, Any], None]:
+        """逐块转发文本，并将工具调用增量合并成一条 assistant 消息。"""
+        content_parts: list[str] = []
+        tool_calls_by_index: dict[int, dict[str, Any]] = {}
+
+        try:
+            async for chunk in stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+
+                content = getattr(delta, "content", None)
+                if content:
+                    content_parts.append(content)
+                    yield {"type": "text", "chunk": content}
+
+                for call in getattr(delta, "tool_calls", None) or []:
+                    index = call.index
+                    merged = tool_calls_by_index.setdefault(
+                        index,
+                        {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+                    )
+                    if call.id:
+                        merged["id"] = call.id
+                    function = getattr(call, "function", None)
+                    if function:
+                        merged["function"]["name"] += getattr(function, "name", None) or ""
+                        merged["function"]["arguments"] += getattr(function, "arguments", None) or ""
+        finally:
+            await stream.close()
+
+        tool_calls = [tool_calls_by_index[index] for index in sorted(tool_calls_by_index)]
+        content = "".join(content_parts)
+        message: dict[str, Any] = {"role": "assistant", "content": content}
+        if tool_calls:
+            if not content:
+                message["content"] = None
+            message["tool_calls"] = tool_calls
+        yield {"type": "response", "message": message, "tool_calls": tool_calls}
 
     async def _execute_tool(self, name: str, arguments: dict[str, Any]) -> str:
         registered = self._tools.get(name)

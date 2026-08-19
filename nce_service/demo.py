@@ -14,12 +14,10 @@ logging.basicConfig(level=logging.INFO, format="%(name)s - %(message)s")
 async def main():
     load_dotenv()
 
-    messages = [{"role": "user", "content": "你好，你是是谁？"}]
+    messages = [{"role": "user", "content": "我希望你写一个300字的网络分析经验"}]
     # 在事件循环结束前关闭底层 HTTP 连接池，避免异步生成器在解释器退出阶段才被回收。
     async with LLMService.from_env() as llm:
-        answer = await llm.stream_and_collect(messages)
-
-    print(f"\n最终回答: {answer}")
+        await llm.stream_and_collect(messages)
 
 
 if __name__ == "__main__":

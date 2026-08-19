@@ -41,7 +41,6 @@ class LLMConfig:
 
 
 logger = logging.getLogger(__name__)
-stream_logger = logging.getLogger("llm.stream")
 
 # 单条 prompt 消息打日志时的截断长度（避免每次 LLM 调用都把整段 system prompt
 # 写进日志造成膨胀）。设为 0 可关闭截断打印全文，调试时用。
@@ -88,6 +87,14 @@ class LLMService:
     @property
     def temperature(self):
         return self._temperature
+
+    @property
+    def top_p(self):
+        return self._top_p
+
+    @property
+    def max_tokens(self):
+        return self._max_tokens
 
     @staticmethod
     def _parse_json(raw: str) -> dict:
@@ -181,7 +188,10 @@ class LLMService:
             # 才被回收，并产生 ``generator didn't stop after athrow()`` 警告。
             await stream.close()
 
-        _log_output(answer_content, reasoning_content, finish_reason, usage)
+        # 实时输出时答案已经完整呈现给调用方，不再重复记录 Output 日志。
+        # complete()/complete_json() 不展示流，因此仍保留完整输出日志便于排查。
+        if not print_stream:
+            _log_output(answer_content, reasoning_content, finish_reason, usage)
         return _handle_empty_answer(answer_content, reasoning_content, finish_reason)
 
     async def _create_stream(
@@ -229,42 +239,48 @@ def _log_prompt(messages: list[dict]) -> None:
 async def _collect_stream(stream, print_stream: bool) -> tuple:
     reasoning_content = ""
     answer_content = ""
-    is_answering = False
+    wrote_to_terminal = False
     finish_reason = None
     usage = None
 
-    async for chunk in stream:
-        usage = getattr(chunk, "usage", None) or usage
-        if not chunk.choices:
-            continue
-        choice = chunk.choices[0]
-        finish_reason = getattr(choice, "finish_reason", None) or finish_reason
-        delta = choice.delta
+    try:
+        async for chunk in stream:
+            usage = getattr(chunk, "usage", None) or usage
+            if not chunk.choices:
+                continue
+            choice = chunk.choices[0]
+            finish_reason = getattr(choice, "finish_reason", None) or finish_reason
+            delta = choice.delta
 
-        reasoning = getattr(delta, "reasoning_content", None)
-        if reasoning:
-            reasoning_content += reasoning
-            if print_stream and not is_answering:
-                stream_logger.info(reasoning)
+            reasoning = getattr(delta, "reasoning_content", None)
+            if reasoning:
+                reasoning_content += reasoning
 
-        content = getattr(delta, "content", None)
-        if content:
-            if not is_answering:
-                is_answering = True
-            answer_content += content
-            if print_stream:
-                stream_logger.info(content)
+            content = getattr(delta, "content", None)
+            if content:
+                answer_content += content
+                if print_stream:
+                    # 不走 logging，避免每个增量都被格式化成单独一行；flush=True
+                    # 让终端呈现与前端逐块追加文本相同的效果。
+                    print(content, end="", flush=True)
+                    wrote_to_terminal = True
+    finally:
+        if wrote_to_terminal:
+            print(flush=True)
 
     return answer_content, reasoning_content, finish_reason, usage
 
 
 def _log_output(
-        answer_content: str, reasoning_content: str, finish_reason: str, usage
+        answer_content: str, reasoning_content: str, finish_reason: str, usage,
+        include_answer: bool = True,
 ) -> None:
-    logger.info(
-        "[LLM Output] (%d字，reasoning=%d字，finish_reason=%s，usage=%s):\n%s",
-        len(answer_content), len(reasoning_content), finish_reason, usage, answer_content,
-    )
+    message = "[LLM Output] (%d字，reasoning=%d字，finish_reason=%s，usage=%s)"
+    args = (len(answer_content), len(reasoning_content), finish_reason, usage)
+    if include_answer:
+        message += ":\n%s"
+        args += (answer_content,)
+    logger.info(message, *args)
     if reasoning_content:
         logger.info("[LLM reasoning_content 全文]\n%s", reasoning_content)
 
