@@ -39,6 +39,7 @@ class LLMConfig:
     max_retry: int = 2
     extra_payload: dict = field(default_factory=dict)
 
+
 logger = logging.getLogger(__name__)
 stream_logger = logging.getLogger("llm.stream")
 
@@ -126,6 +127,16 @@ class LLMService:
             max_tokens=int(os.getenv("LLM_MAX_TOKENS", 4096)),
         )
 
+    async def close(self) -> None:
+        """关闭底层 HTTP 客户端并释放连接池。"""
+        await self._client.close()
+
+    async def __aenter__(self) -> "LLMService":
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback) -> None:
+        await self.close()
+
     async def stream_and_collect(
             self, messages: list[dict], config: LLMConfig | None = None
     ) -> str:
@@ -160,9 +171,15 @@ class LLMService:
         _log_prompt(messages)
 
         stream = await self._create_stream(model, messages, temperature, top_p, max_tokens)
-        answer_content, reasoning_content, finish_reason, usage = await _collect_stream(
-            stream, print_stream
-        )
+        try:
+            answer_content, reasoning_content, finish_reason, usage = await _collect_stream(
+                stream, print_stream
+            )
+        finally:
+            # AsyncStream 即使在遍历完成后也应显式关闭；若消费过程中取消或抛出异常，
+            # 这一步尤其重要，否则 httpx/httpcore 的异步生成器可能拖到事件循环关闭时
+            # 才被回收，并产生 ``generator didn't stop after athrow()`` 警告。
+            await stream.close()
 
         _log_output(answer_content, reasoning_content, finish_reason, usage)
         return _handle_empty_answer(answer_content, reasoning_content, finish_reason)

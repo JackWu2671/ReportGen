@@ -3,7 +3,7 @@ fastapi>=0.111.0
 uvicorn>=0.29.0
 
 # OpenAI client
-openai>=1.30.0
+openai>=1.30.0,<3.0.0
 
 # Data validation (used by FastAPI)
 pydantic>=2.7.0
