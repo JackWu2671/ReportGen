@@ -19,8 +19,9 @@ from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
 from typing import Any
 
-from nce_service.llm_service import LLMService
 from skill_registry import SkillRegistry
+from nce_service.llm_service import LLMService
+
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,7 @@ class Agent:
     def _done_event(started: float) -> dict[str, Any]:
         return {"type": "done", "seconds": round(time.monotonic() - started, 1)}
 
+    @staticmethod
     def _build_system_prompt(self) -> str:
         lines = []
         for m in self.skills.list_all():

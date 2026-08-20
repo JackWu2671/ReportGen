@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 """
 skill_loader.py — hermes-agent 风格的三级渐进式 skill 加载。
 
@@ -6,9 +9,10 @@ Level 1  read_skill(name)         → 完整 SKILL.md 正文（SOP）
 Level 2  read_skill(name, path)   → skills/<name>/<path> 指定文件内容
 """
 
+from pathlib import Path
 import re
 import yaml
-from pathlib import Path
+
 
 _FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\s*", re.DOTALL)
 
