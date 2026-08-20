@@ -48,7 +48,6 @@ _PROMPT_LOG_LIMIT = int(os.environ.get("PROMPT_LOG_LIMIT", "800"))
 
 # 绕过代理直连 LLM 服务，避免内网地址被代理拦截
 os.environ.setdefault("NO_PROXY", "oneapi.rnd.huawei.com")
-os.environ.setdefault("no_proxy", "oneapi.rnd.huawei.com")
 
 
 class LLMService:
