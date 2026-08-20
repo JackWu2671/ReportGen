@@ -5,7 +5,7 @@
 """
 LLM 服务层，封装 OpenAI-compatible chat completions API（openai SDK）。
 
-  stream_and_collect()  流式调用，实时打印，返回正式回答内容字符串
+  stream_and_collect()  流式调用，通过回调传递增量并返回正式回答内容字符串
   complete()            流式调用，不打印，返回正式回答内容字符串
   complete_json()       complete() + JSON 解析
 
@@ -19,7 +19,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
-
+from typing import Callable
 from openai import AsyncOpenAI
 
 
@@ -75,6 +75,12 @@ class LLMService:
         self._timeout = timeout
         self.enable_thinking = enable_thinking
         self._max_tokens = max_tokens
+
+    async def __aenter__(self) -> "LLMService":
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback) -> None:
+        await self.close()
 
     @property
     def client(self):
@@ -138,23 +144,20 @@ class LLMService:
         """关闭底层 HTTP 客户端并释放连接池。"""
         await self._client.close()
 
-    async def __aenter__(self) -> "LLMService":
-        return self
-
-    async def __aexit__(self, exc_type, exc_value, traceback) -> None:
-        await self.close()
-
     async def stream_and_collect(
-            self, messages: list[dict], config: LLMConfig | None = None
+            self,
+            messages: list[dict],
+            config: LLMConfig | None = None,
+            on_content: Callable[[str], None] | None = None,
     ) -> str:
-        """流式调用，实时打印到终端，返回正式回答内容字符串（不含思考内容）。"""
-        return await self._stream(messages, config, print_stream=True)
+        """流式调用，通过回调传递增量内容，并返回完整正式回答。"""
+        return await self._stream(messages, config, on_content=on_content)
 
     async def complete(
             self, messages: list[dict], config: LLMConfig | None = None
     ) -> str:
         """流式调用，不打印，返回正式回答内容字符串（不含思考内容）。"""
-        return await self._stream(messages, config, print_stream=False)
+        return await self._stream(messages, config)
 
     async def complete_json(
             self, messages: list[dict], config: LLMConfig | None = None
@@ -167,7 +170,7 @@ class LLMService:
             self,
             messages: list[dict],
             config: LLMConfig | None = None,
-            print_stream: bool = False,
+            on_content: Callable[[str], None] | None = None,
     ) -> str:
         cfg = config or LLMConfig()
         model, temperature, top_p, max_tokens = _resolve_config(
@@ -180,7 +183,7 @@ class LLMService:
         stream = await self._create_stream(model, messages, temperature, top_p, max_tokens)
         try:
             answer_content, reasoning_content, finish_reason, usage = await _collect_stream(
-                stream, print_stream
+                stream, on_content
             )
         finally:
             # AsyncStream 即使在遍历完成后也应显式关闭；若消费过程中取消或抛出异常，
@@ -188,9 +191,9 @@ class LLMService:
             # 才被回收，并产生 ``generator didn't stop after athrow()`` 警告。
             await stream.close()
 
-        # 实时输出时答案已经完整呈现给调用方，不再重复记录 Output 日志。
-        # complete()/complete_json() 不展示流，因此仍保留完整输出日志便于排查。
-        if not print_stream:
+        # 通过回调展示时答案已经完整呈现给调用方，不再重复记录 Output 日志。
+        # 未提供回调时仍保留完整输出日志，便于排查。
+        if on_content is None:
             _log_output(answer_content, reasoning_content, finish_reason, usage)
         return _handle_empty_answer(answer_content, reasoning_content, finish_reason)
 
@@ -236,37 +239,31 @@ def _log_prompt(messages: list[dict]) -> None:
         logger.info("[LLM Prompt][%s]\n%s", m["role"], text)
 
 
-async def _collect_stream(stream, print_stream: bool) -> tuple:
+async def _collect_stream(
+        stream, on_content: Callable[[str], None] | None = None
+) -> tuple:
     reasoning_content = ""
     answer_content = ""
-    wrote_to_terminal = False
     finish_reason = None
     usage = None
 
-    try:
-        async for chunk in stream:
-            usage = getattr(chunk, "usage", None) or usage
-            if not chunk.choices:
-                continue
-            choice = chunk.choices[0]
-            finish_reason = getattr(choice, "finish_reason", None) or finish_reason
-            delta = choice.delta
+    async for chunk in stream:
+        usage = getattr(chunk, "usage", None) or usage
+        if not chunk.choices:
+            continue
+        choice = chunk.choices[0]
+        finish_reason = getattr(choice, "finish_reason", None) or finish_reason
+        delta = choice.delta
 
-            reasoning = getattr(delta, "reasoning_content", None)
-            if reasoning:
-                reasoning_content += reasoning
+        reasoning = getattr(delta, "reasoning_content", None)
+        if reasoning:
+            reasoning_content += reasoning
 
-            content = getattr(delta, "content", None)
-            if content:
-                answer_content += content
-                if print_stream:
-                    # 不走 logging，避免每个增量都被格式化成单独一行；flush=True
-                    # 让终端呈现与前端逐块追加文本相同的效果。
-                    print(content, end="", flush=True)
-                    wrote_to_terminal = True
-    finally:
-        if wrote_to_terminal:
-            print(flush=True)
+        content = getattr(delta, "content", None)
+        if content:
+            answer_content += content
+            if on_content is not None:
+                on_content(content)
 
     return answer_content, reasoning_content, finish_reason, usage
 

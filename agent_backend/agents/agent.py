@@ -53,6 +53,25 @@ class Agent:
         except (json.JSONDecodeError, TypeError):
             return {}
 
+    @staticmethod
+    def _merge_tool_call(
+            tool_calls_by_index: dict[int, dict[str, Any]], call: Any
+    ) -> None:
+        merged = tool_calls_by_index.setdefault(
+            call.index,
+            {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+        )
+        if call.id:
+            merged["id"] = call.id
+        function = getattr(call, "function", None)
+        if function is not None:
+            merged["function"]["name"] += getattr(function, "name", None) or ""
+            merged["function"]["arguments"] += getattr(function, "arguments", None) or ""
+
+    @staticmethod
+    def _done_event(started: float) -> dict[str, Any]:
+        return {"type": "done", "seconds": round(time.monotonic() - started, 1)}
+
     def register_tool(
             self, schema: dict[str, Any], handler: Callable[..., Any]
     ) -> None:
@@ -89,45 +108,35 @@ class Agent:
         started = time.monotonic()
 
         for _ in range(self.max_rounds):
-            try:
-                stream = await self._call_llm()
-                assistant_message = None
-                tool_calls = []
-                async for response_event in self._iter_response(stream):
-                    if response_event["type"] == "text":
-                        yield response_event
-                    else:
-                        assistant_message = response_event["message"]
-                        tool_calls = response_event["tool_calls"]
-            except Exception as exc:
-                logger.exception("LLM request failed")
-                yield {"type": "error", "message": f"大模型调用失败: {exc}"}
-                yield {"type": "done", "seconds": round(time.monotonic() - started, 1)}
+            assistant_message = None
+            tool_calls = []
+            async for response_event in self._request_events():
+                if response_event["type"] == "text":
+                    yield response_event
+                    continue
+                if response_event["type"] == "error":
+                    yield response_event
+                    yield self._done_event(started)
+                    return
+                assistant_message = response_event["message"]
+                tool_calls = response_event["tool_calls"]
+
+            if assistant_message is None:
+                yield {"type": "error", "message": "大模型响应不完整"}
+                yield self._done_event(started)
                 return
 
-            assert assistant_message is not None
             self.messages.append(assistant_message)
 
             if not tool_calls:
-                yield {"type": "done", "seconds": round(time.monotonic() - started, 1)}
+                yield self._done_event(started)
                 return
 
-            for call in tool_calls:
-                name = call["function"]["name"]
-                arguments = self._parse_arguments(call["function"]["arguments"])
-                yield {"type": "step", "status": "running", "name": name, "args": arguments}
-                result = await self._execute_tool(name, arguments)
-                yield {"type": "step", "status": "done", "name": name, "result": result}
-                self.messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": call["id"],
-                        "content": result,
-                    }
-                )
+            async for tool_event in self._run_tools(tool_calls):
+                yield tool_event
 
         yield {"type": "error", "message": f"工具调用超过 {self.max_rounds} 轮"}
-        yield {"type": "done", "seconds": round(time.monotonic() - started, 1)}
+        yield self._done_event(started)
 
     async def _call_llm(self):
         messages = [{"role": "system", "content": self.system_prompt}, *self.messages]
@@ -169,17 +178,7 @@ class Agent:
                     yield {"type": "text", "chunk": content}
 
                 for call in getattr(delta, "tool_calls", None) or []:
-                    index = call.index
-                    merged = tool_calls_by_index.setdefault(
-                        index,
-                        {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
-                    )
-                    if call.id:
-                        merged["id"] = call.id
-                    function = getattr(call, "function", None)
-                    if function:
-                        merged["function"]["name"] += getattr(function, "name", None) or ""
-                        merged["function"]["arguments"] += getattr(function, "arguments", None) or ""
+                    self._merge_tool_call(tool_calls_by_index, call)
         finally:
             await stream.close()
 
@@ -191,6 +190,28 @@ class Agent:
                 message["content"] = None
             message["tool_calls"] = tool_calls
         yield {"type": "response", "message": message, "tool_calls": tool_calls}
+
+    async def _request_events(self) -> AsyncGenerator[dict[str, Any], None]:
+        try:
+            stream = await self._call_llm()
+            async for event in self._iter_response(stream):
+                yield event
+        except Exception as exc:
+            logger.exception("LLM request failed")
+            yield {"type": "error", "message": f"大模型调用失败: {exc}"}
+
+    async def _run_tools(
+            self, tool_calls: list[dict[str, Any]]
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        for call in tool_calls:
+            name = call["function"]["name"]
+            arguments = self._parse_arguments(call["function"]["arguments"])
+            yield {"type": "step", "status": "running", "name": name, "args": arguments}
+            result = await self._execute_tool(name, arguments)
+            yield {"type": "step", "status": "done", "name": name, "result": result}
+            self.messages.append(
+                {"role": "tool", "tool_call_id": call["id"], "content": result}
+            )
 
     async def _execute_tool(self, name: str, arguments: dict[str, Any]) -> str:
         registered = self._tools.get(name)

@@ -43,8 +43,6 @@ async def main() -> None:
                 print(f"\n[{event['name']}: {event['status']}]", flush=True)
             elif event["type"] == "error":
                 print(f"\n错误: {event['message']}", flush=True)
-        print()
-
 
 if __name__ == "__main__":
     asyncio.run(main())
