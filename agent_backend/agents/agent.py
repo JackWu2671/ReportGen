@@ -10,14 +10,17 @@ plain conversational agent and later add tools with :meth:`register_tool`.
 from __future__ import annotations
 
 import inspect
+import os
 import json
 import logging
 import time
+import uuid
 from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
 from typing import Any
 
 from nce_service.llm_service import LLMService
+from skill_registry import SkillRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +28,19 @@ _MAX_ROUNDS = 8
 _DEFAULT_SYSTEM_PROMPT = Path(__file__).with_name("system_prompt.txt").read_text(
     encoding="utf-8"
 )
+_AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
+_BACKEND_DIR = os.path.dirname(_AGENT_DIR)
+_SKILLS_DIR = Path(_BACKEND_DIR) / "skills"
+_SYSTEM_PROMPT = (Path(_AGENT_DIR) / "system_prompt.txt").read_text(encoding="utf-8")
+_SKILL_SYSTEM_TEMPLATE = """\
+<skill_system>
+遇到复杂任务先用 read_skill(<skill_name>) 阅读工作流指导，再用 bash 执行对应脚本。
+只在需要时读取，不要预先读取所有技能。
+
+<available_skills>
+{skill_entries}
+</available_skills>
+</skill_system>"""
 
 
 class Agent:
@@ -33,14 +49,18 @@ class Agent:
     def __init__(
             self,
             *,
+            session_id: str = "",
             llm: LLMService | None = None,
             system_prompt: str | None = None,
             max_rounds: int = _MAX_ROUNDS,
     ) -> None:
         if max_rounds < 1:
             raise ValueError("max_rounds must be at least 1")
+        self.skills = SkillRegistry(_SKILLS_DIR)
         self.llm = llm or LLMService.from_env()
-        self.system_prompt = system_prompt or _DEFAULT_SYSTEM_PROMPT
+        self.system_prompt = self._build_system_prompt()
+
+        self.session_id = session_id or str(uuid.uuid4())
         self.max_rounds = max_rounds
         self.messages: list[dict[str, Any]] = []
         self._tools: dict[str, tuple[dict[str, Any], Callable[..., Any]]] = {}
@@ -71,6 +91,14 @@ class Agent:
     @staticmethod
     def _done_event(started: float) -> dict[str, Any]:
         return {"type": "done", "seconds": round(time.monotonic() - started, 1)}
+
+    def _build_system_prompt(self) -> str:
+        lines = []
+        for m in self.skills.list_all():
+            cat = f"[{m['category']}] " if m.get("category") else ""
+            lines.append(f"- {cat}{m['name']}: {m.get('description', '')}")
+        skill_block = _SKILL_SYSTEM_TEMPLATE.format(skill_entries="\n".join(lines))
+        return f"{_SYSTEM_PROMPT}\n\n{skill_block}"
 
     def register_tool(
             self, schema: dict[str, Any], handler: Callable[..., Any]

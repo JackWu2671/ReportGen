@@ -22,6 +22,12 @@ from dataclasses import dataclass, field
 from typing import Callable
 from openai import AsyncOpenAI
 
+_DEFAULT_BASE_URL = "http://localhost:8000/v1"
+_DEFAULT_TEMPERATURE = 0.1
+_DEFAULT_TOP_P = 1.0
+_DEFAULT_TIMEOUT = 120
+_DEFAULT_MAX_TOKENS = 4096
+
 
 @dataclass
 class LLMConfig:
@@ -46,9 +52,6 @@ logger = logging.getLogger(__name__)
 # 写进日志造成膨胀）。设为 0 可关闭截断打印全文，调试时用。
 _PROMPT_LOG_LIMIT = int(os.environ.get("PROMPT_LOG_LIMIT", "800"))
 
-# 绕过代理直连 LLM 服务，避免内网地址被代理拦截
-os.environ.setdefault("NO_PROXY", "oneapi.rnd.huawei.com")
-
 
 class LLMService:
     def __init__(
@@ -56,11 +59,11 @@ class LLMService:
             base_url: str,
             model: str = "",
             api_key: str = "",
-            temperature: float = 0.1,
-            top_p: float = 1.0,
-            timeout: int = 120,
+            temperature: float = _DEFAULT_TEMPERATURE,
+            top_p: float = _DEFAULT_TOP_P,
+            timeout: int = _DEFAULT_TIMEOUT,
             enable_thinking: bool = False,
-            max_tokens: int = 4096,
+            max_tokens: int = _DEFAULT_MAX_TOKENS,
     ):
         self._client = AsyncOpenAI(
             api_key=api_key or "EMPTY",
@@ -129,14 +132,14 @@ class LLMService:
     def from_env(cls) -> "LLMService":
         """从环境变量构造实例（需在调用前 load_dotenv）。"""
         return cls(
-            base_url=os.getenv("LLM_BASE_URL", "http://localhost:8000/v1"),
+            base_url=os.getenv("LLM_BASE_URL", _DEFAULT_BASE_URL),
             model=os.getenv("LLM_MODEL_NAME", ""),
             api_key=os.getenv("LLM_API_KEY", ""),
-            temperature=float(os.getenv("LLM_TEMPERATURE", 0.1)),
-            top_p=float(os.getenv("LLM_TOP_P", 1.0)),
-            timeout=int(os.getenv("LLM_TIMEOUT", 120)),
+            temperature=float(os.getenv("LLM_TEMPERATURE", _DEFAULT_TEMPERATURE)),
+            top_p=float(os.getenv("LLM_TOP_P", _DEFAULT_TOP_P)),
+            timeout=int(os.getenv("LLM_TIMEOUT", _DEFAULT_TIMEOUT)),
             enable_thinking=os.getenv("LLM_ENABLE_THINKING", "false").lower() == "true",
-            max_tokens=int(os.getenv("LLM_MAX_TOKENS", 4096)),
+            max_tokens=int(os.getenv("LLM_MAX_TOKENS", _DEFAULT_MAX_TOKENS)),
         )
 
     async def close(self) -> None:

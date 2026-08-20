@@ -13,7 +13,7 @@ skill_registry.py — SkillRegistry：skill 的注册、查询、禁用与重载
 import logging
 from pathlib import Path
 
-from agent_with_skills.skill_loader import discover_skills, read_skill
+from skill_loader import discover_skills, read_skill
 
 logger = logging.getLogger(__name__)
 
