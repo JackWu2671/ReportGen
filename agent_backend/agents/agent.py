@@ -22,7 +22,6 @@ from typing import Any
 from skill_registry import SkillRegistry
 from nce_service.llm_service import LLMService
 
-
 logger = logging.getLogger(__name__)
 
 _MAX_ROUNDS = 8
@@ -93,15 +92,6 @@ class Agent:
     def _done_event(started: float) -> dict[str, Any]:
         return {"type": "done", "seconds": round(time.monotonic() - started, 1)}
 
-    @staticmethod
-    def _build_system_prompt(self) -> str:
-        lines = []
-        for m in self.skills.list_all():
-            cat = f"[{m['category']}] " if m.get("category") else ""
-            lines.append(f"- {cat}{m['name']}: {m.get('description', '')}")
-        skill_block = _SKILL_SYSTEM_TEMPLATE.format(skill_entries="\n".join(lines))
-        return f"{_SYSTEM_PROMPT}\n\n{skill_block}"
-
     def register_tool(
             self, schema: dict[str, Any], handler: Callable[..., Any]
     ) -> None:
@@ -167,6 +157,14 @@ class Agent:
 
         yield {"type": "error", "message": f"工具调用超过 {self.max_rounds} 轮"}
         yield self._done_event(started)
+
+    def _build_system_prompt(self) -> str:
+        lines = []
+        for m in self.skills.list_all():
+            cat = f"[{m['category']}] " if m.get("category") else ""
+            lines.append(f"- {cat}{m['name']}: {m.get('description', '')}")
+        skill_block = _SKILL_SYSTEM_TEMPLATE.format(skill_entries="\n".join(lines))
+        return f"{_SYSTEM_PROMPT}\n\n{skill_block}"
 
     async def _call_llm(self):
         messages = [{"role": "system", "content": self.system_prompt}, *self.messages]
